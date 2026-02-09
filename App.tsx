@@ -16,7 +16,7 @@ const INITIAL_MESSAGES: Message[] = [
   }
 ];
 
-const EXPIRATION_TIME = 24 * 60 * 60 * 1000; // 24 horas em milisegundos
+const EXPIRATION_TIME = 24 * 60 * 60 * 1000;
 
 const App: React.FC = () => {
   const [activeAgent, setActiveAgent] = useState<AgentType>(AgentType.IDEIAS);
@@ -25,6 +25,7 @@ const App: React.FC = () => {
   const [showProjectInfo, setShowProjectInfo] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [voicePreference, setVoicePreference] = useState<VoiceType>('baiana');
+  const [isMobile, setIsMobile] = useState(false);
   const [context, setContext] = useState<ProjectContext>({
     name: 'Projeto HYPLEY',
     description: '',
@@ -37,16 +38,21 @@ const App: React.FC = () => {
 
   const syncChannel = useRef<BroadcastChannel | null>(null);
 
-  // Carregamento inicial e Limpeza de 24h
   useEffect(() => {
-    // Carregar Contexto e Voz
+    const checkMobile = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      if (mobile) setIsAppOpen(true);
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+
     const savedContext = localStorage.getItem('hypley_context');
     if (savedContext) setContext(JSON.parse(savedContext));
     
     const savedVoice = localStorage.getItem('hypley_voice') as VoiceType;
     if (savedVoice) setVoicePreference(savedVoice);
 
-    // Carregar e Filtrar Mensagens (Máximo 24h)
     const savedMessages = localStorage.getItem('hypley_messages');
     const now = Date.now();
     
@@ -56,7 +62,6 @@ const App: React.FC = () => {
         const validMessages = parsed
           .map(m => ({ ...m, timestamp: new Date(m.timestamp) }))
           .filter(m => (now - m.timestamp.getTime()) < EXPIRATION_TIME);
-        
         setMessages(validMessages.length > 0 ? validMessages : INITIAL_MESSAGES);
       } catch (e) {
         setMessages(INITIAL_MESSAGES);
@@ -65,7 +70,6 @@ const App: React.FC = () => {
       setMessages(INITIAL_MESSAGES);
     }
 
-    // Inicializar Canal de Sincronização
     syncChannel.current = new BroadcastChannel('hypley_sync');
     syncChannel.current.onmessage = (event) => {
       const { type, payload } = event.data;
@@ -84,14 +88,12 @@ const App: React.FC = () => {
       }
     };
 
-    if ("Notification" in window) {
-      Notification.requestPermission();
-    }
-
-    return () => syncChannel.current?.close();
+    return () => {
+      syncChannel.current?.close();
+      window.removeEventListener('resize', checkMobile);
+    };
   }, []);
 
-  // Persistência Automática
   useEffect(() => {
     localStorage.setItem('hypley_context', JSON.stringify(context));
     localStorage.setItem('hypley_voice', voicePreference);
@@ -109,7 +111,6 @@ const App: React.FC = () => {
         if (!skipSync) syncChannel.current?.postMessage({ type: 'NEW_MESSAGE', payload: newMessage });
         return prev.map(m => m.id === msg.id ? newMessage : m);
       }
-      
       newMessage = {
         id: msg.id || Date.now().toString(),
         sender: msg.sender || 'user',
@@ -122,34 +123,20 @@ const App: React.FC = () => {
         imageUrl: msg.imageUrl,
         sources: msg.sources
       };
-      
       if (!skipSync) syncChannel.current?.postMessage({ type: 'NEW_MESSAGE', payload: newMessage });
       return [...prev, newMessage];
     });
-
-    if (msg.sender === 'user' && msg.content) {
-      const lowerContent = msg.content.toLowerCase();
-      if (lowerContent.includes('projeto:')) {
-        const name = msg.content.split(/projeto:/i)[1]?.split('\n')[0].trim();
-        if (name) {
-          const newContext = { ...context, name };
-          setContext(newContext);
-          syncChannel.current?.postMessage({ type: 'UPDATE_CONTEXT', payload: newContext });
-        }
-      }
-    }
-  }, [context]);
+  }, []);
 
   const handleSelectAgent = (agent: AgentType) => {
     setActiveAgent(agent);
     setIsSidebarOpen(false);
-    
     const hasAgentChat = messages.some(m => m.agentType === agent);
     if (!hasAgentChat) {
       handleSendMessage({
         sender: 'agent',
         agentType: agent,
-        content: `Módulo Hypley ${agent.charAt(0).toUpperCase() + agent.slice(1)} ativado, meu amor. Analisando o projeto "${context.name}"... Em que posso te ajudar agora?`,
+        content: `Módulo Hypley ${agent.charAt(0).toUpperCase() + agent.slice(1)} ativado. Como posso te ajudar, meu amor?`,
         timestamp: new Date(),
         type: 'text'
       });
@@ -160,21 +147,10 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#020617] relative text-slate-100 font-sans">
-      <FloatingOverlay 
-        isOpen={isAppOpen} 
-        onToggleMain={() => setIsAppOpen(!isAppOpen)} 
-      />
+      <FloatingOverlay isOpen={isAppOpen} onToggleMain={() => setIsAppOpen(!isAppOpen)} />
 
-      <div className={`flex w-full h-full transition-all duration-300 ease-in-out ${
-        isAppOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'
-      }`}>
-        <Sidebar 
-          activeAgent={activeAgent} 
-          onSelectAgent={handleSelectAgent} 
-          isOpen={isSidebarOpen}
-          onClose={() => setIsSidebarOpen(false)}
-          lastMessages={messages}
-        />
+      <div className={`flex w-full h-full transition-all duration-300 ease-in-out ${isAppOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}`}>
+        <Sidebar activeAgent={activeAgent} onSelectAgent={handleSelectAgent} isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} lastMessages={messages} />
 
         <main className="flex-1 flex flex-col h-full bg-[#020617] relative overflow-hidden">
           <ChatWindow 
@@ -202,53 +178,11 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
-            <div className="space-y-2">
-              <label className="text-[11px] text-blue-400 font-bold uppercase tracking-wider">Projeto Ativo</label>
-              <div className="p-3 bg-slate-800/50 rounded-lg text-sm border border-slate-700 font-bold text-white">{context.name}</div>
-            </div>
-
             <div className="space-y-4">
-              <label className="text-[11px] text-blue-400 font-bold uppercase tracking-wider">Configuração de Voz</label>
-              <div className="flex flex-col gap-2">
-                <button 
-                  onClick={() => {
-                    setVoicePreference('baiana');
-                    syncChannel.current?.postMessage({ type: 'UPDATE_VOICE', payload: 'baiana' });
-                  }}
-                  className={`flex items-center justify-between p-3 rounded-xl border transition-all ${voicePreference === 'baiana' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}
-                >
-                  <div className="flex flex-col items-start">
-                    <span className="text-sm font-bold">Voz Baiana</span>
-                    <span className="text-[10px] opacity-60">Amorosa e Acolhedora</span>
-                  </div>
-                  {voicePreference === 'baiana' && <div className="w-2 h-2 rounded-full bg-blue-500 shadow-lg shadow-blue-500"></div>}
-                </button>
-                <button 
-                  onClick={() => {
-                    setVoicePreference('carioca');
-                    syncChannel.current?.postMessage({ type: 'UPDATE_VOICE', payload: 'carioca' });
-                  }}
-                  className={`flex items-center justify-between p-3 rounded-xl border transition-all ${voicePreference === 'carioca' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}
-                >
-                  <div className="flex flex-col items-start">
-                    <span className="text-sm font-bold">Voz Carioca</span>
-                    <span className="text-[10px] opacity-60">Estilo Xuxa (Angelical) 🧚‍♀️</span>
-                  </div>
-                  {voicePreference === 'carioca' && <div className="w-2 h-2 rounded-full bg-blue-500 shadow-lg shadow-blue-500"></div>}
-                </button>
-              </div>
-            </div>
-
-            <div className="space-y-3 pt-4 border-t border-slate-800">
-              <label className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">Agentes em Background</label>
-              <div className="grid grid-cols-1 gap-2">
-                {Object.values(AgentType).map((type) => (
-                  <div key={type} className={`flex items-center gap-3 p-2.5 rounded-xl border transition-all ${messages.some(m => m.agentType === type) ? 'border-blue-500/30 bg-blue-500/5 text-blue-400' : 'border-slate-800 text-slate-600 opacity-50'}`}>
-                    <div className="w-2 h-2 rounded-full bg-current animate-pulse"></div>
-                    <span className="text-[11px] font-bold uppercase">{type}</span>
-                    <span className="ml-auto text-[9px] font-mono">ON</span>
-                  </div>
-                ))}
+              <label className="text-[11px] text-blue-400 font-bold uppercase tracking-wider">Projeto Ativo</label>
+              <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <div className="text-sm font-bold text-white mb-1">{context.name}</div>
+                <div className="text-[10px] text-slate-500 italic">As vozes podem ser alteradas no centro da tela durante o Modo Voz.</div>
               </div>
             </div>
           </div>

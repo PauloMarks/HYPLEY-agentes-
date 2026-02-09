@@ -41,6 +41,26 @@
             animation: fadeIn 0.3s ease-out forwards;
         }
 
+        /* Audio Line Animation */
+        @keyframes audioLine {
+            0% { transform: scaleX(0.8); opacity: 0.5; }
+            50% { transform: scaleX(1.1); opacity: 1; filter: blur(1px); }
+            100% { transform: scaleX(0.8); opacity: 0.5; }
+        }
+        .animate-audio-line {
+            animation: audioLine 2s infinite ease-in-out;
+        }
+
+        @keyframes waveFlow {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        .animate-wave-flow {
+            background: linear-gradient(90deg, transparent, #3b82f6, #60a5fa, #3b82f6, transparent);
+            background-size: 200% 100%;
+            animation: waveFlow 3s infinite linear;
+        }
+
         /* Selection Color */
         ::selection {
             background: rgba(59, 130, 246, 0.3);

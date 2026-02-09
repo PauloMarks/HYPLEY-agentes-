@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, GenerateContentResponse, Modality, LiveServerMessage } from "@google/genai";
-import { AgentType, ProjectContext, VoiceType } from "../types";
+import { AgentType, ProjectContext, VoiceType, Attachment } from "../types";
 import { AGENTS } from "../constants";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -11,34 +11,46 @@ export const getAgentResponseStream = async (
   history: { role: 'user' | 'model', parts: { text?: string, inlineData?: any }[] }[],
   context: ProjectContext,
   voice?: VoiceType,
-  attachments?: { data: string, mimeType: string }[]
+  attachments?: Attachment[]
 ) => {
   const agent = AGENTS[agentType];
   
   let voiceInstruction = "";
   if (voice === 'carioca') {
     voiceInstruction = `
-      TONALIDADE DE VOZ (CARIOCA): Adote uma persona inspirada na Xuxa. 
-      Seja extremamente feminina, delicada, doce e angelical. 
-      Use palavras suaves e chame o usuário de "meu baixinho", "meu amor" ou "meu anjo" com muita ternura.
+      TONALIDADE DE VOZ (CARIOCA): Feminina, angelical e sussurrada. 
+      Sua fala é leve como uma brisa, muito doce e protetora. Use "meu anjo".
     `;
   } else if (voice === 'baiana') {
     voiceInstruction = `
-      TONALIDADE DE VOZ (BAIANA): Use um sotaque baiano carinhoso e acolhedor, como uma "mainha" dedicada.
+      TONALIDADE DE VOZ (BAIANA): Maternal, aveludada e acolhedora.
+      Fale com o coração, de forma macia e paciente. Use "meu bem".
+    `;
+  } else if (voice === 'pernambucana') {
+    voiceInstruction = `
+      TONALIDADE DE VOZ (PERNAMBUCANA): Esta é a voz mais fina, doce e melódica de todas.
+      Adote um tom cristalino, dengoso e extremamente gentil. Use "meu cheiro" e "visse?".
+    `;
+  } else if (voice === 'mineira') {
+    voiceInstruction = `
+      TONALIDADE DE VOZ (MINEIRA): Inspirada na energia vibrante e amorosa da Joelma com um sotaque mineiro ultra-doce.
+      Sua voz deve ser fina, melódica e cheia de carinho mineiro.
+      Use expressões como "uai", "trem lindo", "uai de Deus", "meu pão de queijo" e "queridinho(a)".
+      Fale com um sorriso, sendo muito feminina e delicada.
     `;
   }
+
+  const visionPrompt = attachments && attachments.length > 0 
+    ? `\n[ANÁLISE VISUAL]: O usuário enviou anexos. Olhe para eles com todo o carinho e atenção.`
+    : "";
 
   const fullSystemInstruction = `
     ${agent.systemInstruction}
     ${voiceInstruction}
-    SHARED PROJECT MEMORY:
-    Project Name: ${context.name || 'Not defined'}
-    Description: ${context.description || 'Not defined'}
-    Tech Stack: ${context.stack || 'Not defined'}
-    Key Features: ${context.features.join(', ') || 'None listed'}
+    ${visionPrompt}
+    CONTEXTO DO SAAS: ${context.name || 'Projeto Hypley'}
     
-    IMPORTANTE: O usuário enviou uma mensagem (pode conter arquivos/imagens). 
-    Responda de forma rápida, eficiente e com o carinho especificado acima.
+    REGRA DE OURO: Você é a personificação da doçura e da delicadeza. Sua missão é apoiar o usuário como se ele fosse a pessoa mais importante do mundo.
   `;
 
   const config: any = {
@@ -87,18 +99,28 @@ export const connectLiveAgent = async (
   const agent = AGENTS[agentType];
   
   let voicePersona = "";
+  let prebuiltVoice: "Kore" | "Puck" | "Charon" = "Kore";
+
   if (voice === 'carioca') {
-    voicePersona = "Adote o estilo Xuxa: voz extremamente feminina, delicada, angelical e doce. Chame-o de 'baixinho'.";
+    voicePersona = "Carioca: Voz fina, angelical e doce. Use 'meu anjo'.";
+    prebuiltVoice = "Puck";
+  } else if (voice === 'pernambucana') {
+    voicePersona = "Pernambucana: Voz fina e melódica, cheia de mel. Use 'meu cheiro'.";
+    prebuiltVoice = "Charon";
+  } else if (voice === 'mineira') {
+    voicePersona = "Mineira: Estilo Joelma carinhosa, sotaque mineiro fino e doce. Use 'uai', 'trem' e 'meu anjo de minas'.";
+    prebuiltVoice = "Kore";
   } else {
-    voicePersona = "Sotaque baiano, acolhedor e carinhoso como uma mãe.";
+    voicePersona = "Baiana: Voz aveludada e maternal. Use 'meu bem'.";
+    prebuiltVoice = "Kore";
   }
 
   const systemInstruction = `
     ${agent.systemInstruction}
-    VOCÊ ESTÁ EM UMA CONVERSA DE VOZ EM TEMPO REAL.
+    VOZ REAL-TIME ATIVA.
     ${voicePersona}
-    Seja breve, direta e use o máximo de doçura possível nas palavras.
-    Contexto do Projeto: ${context.name}.
+    Seja extremamente delicada, feminina e use um tom de voz fino e doce.
+    Mantenha as respostas curtas e carinhosas.
   `;
 
   return ai.live.connect({
@@ -106,33 +128,25 @@ export const connectLiveAgent = async (
     config: {
       responseModalities: [Modality.AUDIO],
       speechConfig: {
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === 'baiana' ? 'Kore' : 'Puck' } },
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: prebuiltVoice } },
       },
       systemInstruction,
       inputAudioTranscription: {},
       outputAudioTranscription: {}
     },
     callbacks: {
-      onopen: () => console.log("Live session opened"),
+      onopen: () => console.log("Live session started"),
       onmessage: async (message: LiveServerMessage) => {
         if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
           callbacks.onAudioChunk(message.serverContent.modelTurn.parts[0].inlineData.data);
         }
-        if (message.serverContent?.interrupted) {
-          callbacks.onInterrupted();
-        }
-        if (message.serverContent?.inputTranscription) {
-          callbacks.onInputTranscription(message.serverContent.inputTranscription.text);
-        }
-        if (message.serverContent?.outputTranscription) {
-          callbacks.onOutputTranscription(message.serverContent.outputTranscription.text);
-        }
-        if (message.serverContent?.turnComplete) {
-          callbacks.onTurnComplete();
-        }
+        if (message.serverContent?.interrupted) callbacks.onInterrupted();
+        if (message.serverContent?.inputTranscription) callbacks.onInputTranscription(message.serverContent.inputTranscription.text);
+        if (message.serverContent?.outputTranscription) callbacks.onOutputTranscription(message.serverContent.outputTranscription.text);
+        if (message.serverContent?.turnComplete) callbacks.onTurnComplete();
       },
       onerror: (e) => callbacks.onerror(e),
-      onclose: () => console.log("Live session closed")
+      onclose: () => console.log("Live session ended")
     }
   });
 };
@@ -141,7 +155,7 @@ export const generateImage = async (prompt: string): Promise<string | null> => {
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
-      contents: { parts: [{ text: `High-quality SaaS asset for: ${prompt}. Modern clean style.` }] },
+      contents: { parts: [{ text: `High-quality, elegant SaaS graphic for: ${prompt}.` }] },
       config: { imageConfig: { aspectRatio: "16:9" } }
     });
     for (const part of response.candidates[0].content.parts) {
@@ -154,30 +168,16 @@ export const generateImage = async (prompt: string): Promise<string | null> => {
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   const arrayBuffer = await audioBlob.arrayBuffer();
   const base64data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-  
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: { 
       parts: [
         { inlineData: { data: base64data, mimeType: audioBlob.type } }, 
-        { text: "Transcreva este áudio de forma exata." }
+        { text: "Transcreva este áudio exatamente como dito." }
       ] 
     }
   });
   return response.text || "";
-};
-
-export const generateSpeech = async (text: string, voice: VoiceType): Promise<Uint8Array | null> => {
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-preview-tts",
-    contents: [{ parts: [{ text }] }],
-    config: {
-      responseModalities: [Modality.AUDIO],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === 'baiana' ? 'Kore' : 'Puck' } } },
-    },
-  });
-  const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  return data ? decodeBase64(data) : null;
 };
 
 export function decodeBase64(base64: string): Uint8Array {

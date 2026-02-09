@@ -7,11 +7,17 @@ export enum AgentType {
   MARKETING = 'marketing'
 }
 
-export type VoiceType = 'baiana' | 'carioca';
+export type VoiceType = 'baiana' | 'carioca' | 'pernambucana' | 'mineira';
 
 export interface GroundingSource {
   title: string;
   uri: string;
+}
+
+export interface Attachment {
+  data: string;
+  mimeType: string;
+  name: string;
 }
 
 export interface Message {
@@ -26,6 +32,7 @@ export interface Message {
   isSpeaking?: boolean;
   sources?: GroundingSource[];
   imageUrl?: string;
+  attachments?: Attachment[];
 }
 
 export interface AgentMetadata {

@@ -1,11 +1,10 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Message, AgentType, ProjectContext, VoiceType } from '../types';
+import { Message, AgentType, ProjectContext, VoiceType, Attachment } from '../types';
 import { AGENTS } from '../constants';
 import { 
   getAgentResponseStream, 
   transcribeAudio, 
-  generateSpeech, 
   decodeAudioData, 
   generateImage, 
   connectLiveAgent,
@@ -38,22 +37,45 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
   const [liveInputTranscription, setLiveInputTranscription] = useState('');
   const [liveOutputTranscription, setLiveOutputTranscription] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [selectedFiles, setSelectedFiles] = useState<{data: string, mimeType: string, name: string}[]>([]);
+  const [liveCopiedType, setLiveCopiedType] = useState<'input' | 'output' | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<Attachment[]>([]);
   
   const scrollRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const liveSessionRef = useRef<any>(null);
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  
+  const accumulatedInputRef = useRef('');
+  const accumulatedOutputRef = useRef('');
+  const syncChannel = useRef<BroadcastChannel | null>(null);
+
+  useEffect(() => {
+    syncChannel.current = new BroadcastChannel('hypley_live_sync');
+    syncChannel.current.onmessage = (event) => {
+      const { type, payload } = event.data;
+      if (type === 'LIVE_STATE') {
+        setIsLive(payload.active);
+        setLiveInputTranscription(payload.input || '');
+        setLiveOutputTranscription(payload.output || '');
+      }
+    };
+    return () => syncChannel.current?.close();
+  }, []);
+
+  const broadcastLiveState = (active: boolean, input?: string, output?: string) => {
+    syncChannel.current?.postMessage({
+      type: 'LIVE_STATE',
+      payload: { active, input, output }
+    });
+  };
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, isTyping, liveInputTranscription, liveOutputTranscription, isTranscribing, selectedFiles]);
+  }, [messages, isTyping, liveInputTranscription, liveOutputTranscription, isTranscribing, selectedFiles, isLive]);
 
   const initAudioContexts = async () => {
     if (!audioContextRef.current) {
@@ -69,22 +91,21 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   const handleCopyText = (text: string, id: string) => {
+    if (!text) return;
     navigator.clipboard.writeText(text).then(() => {
       setCopiedId(id);
       setTimeout(() => setCopiedId(null), 2000);
     });
   };
 
-  const notifyUser = (title: string, body: string) => {
-    if (document.visibilityState === 'hidden' && Notification.permission === "granted") {
-      new Notification(title, {
-        body,
-        icon: 'https://cdn-icons-png.flaticon.com/512/3249/3249935.png'
-      });
-    }
+  const handleCopyLive = (text: string, type: 'input' | 'output') => {
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      setLiveCopiedType(type);
+      setTimeout(() => setLiveCopiedType(null), 2000);
+    });
   };
 
-  // Fix: Explicitly type 'file' to avoid 'unknown' type errors on lines 95 and 97
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
@@ -104,58 +125,31 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
     setSelectedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleScreenCapture = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      const video = document.createElement('video');
-      video.srcObject = stream;
-      await video.play();
-
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      const dataUrl = canvas.toDataURL('image/png');
-      setSelectedFiles(prev => [...prev, { data: dataUrl, mimeType: 'image/png', name: 'Captura de Tela' }]);
-      
-      stream.getTracks().forEach(t => t.stop());
-    } catch (err) {
-      console.error("Erro na captura de tela:", err);
-    }
-  };
-
   const startRecording = async () => {
+    if (isLive) return; 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
-
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
-
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         setIsTranscribing(true);
         try {
           const text = await transcribeAudio(audioBlob);
           setIsTranscribing(false);
-          if (text && text.trim()) {
-            await processUserMessage(text);
-          }
+          if (text && text.trim()) await processUserMessage(text);
         } catch (err) {
-          console.error("Erro na transcrição:", err);
           setIsTranscribing(false);
         }
       };
-
       mediaRecorder.start();
       setIsRecording(true);
     } catch (err) {
-      console.error("Erro ao iniciar gravação:", err);
+      setIsRecording(false);
     }
   };
 
@@ -167,18 +161,20 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
-  const startLiveMode = async () => {
+  const startLiveMode = async (currentVoice: VoiceType = voicePreference) => {
     const ctx = await initAudioContexts();
     if (ctx.state === 'suspended') await ctx.resume();
-    
     stopAllAudio();
     setIsLive(true);
+    broadcastLiveState(true);
     setLiveInputTranscription('');
     setLiveOutputTranscription('');
+    accumulatedInputRef.current = '';
+    accumulatedOutputRef.current = '';
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const liveSession = await connectLiveAgent(activeAgent, context, voicePreference, {
+      const liveSession = await connectLiveAgent(activeAgent, context, currentVoice, {
         onAudioChunk: async (base64) => {
           const buffer = await decodeAudioData(decodeBase64(base64), ctx, 24000, 1);
           const source = ctx.createBufferSource();
@@ -191,23 +187,41 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
           source.onended = () => sourcesRef.current.delete(source);
         },
         onInterrupted: () => stopAllAudio(),
-        onInputTranscription: (text) => setLiveInputTranscription(prev => prev + text),
-        onOutputTranscription: (text) => setLiveOutputTranscription(prev => prev + text),
+        onInputTranscription: (text) => {
+          setLiveInputTranscription(prev => {
+            const val = prev + text;
+            broadcastLiveState(true, val, accumulatedOutputRef.current);
+            return val;
+          });
+          accumulatedInputRef.current += text;
+        },
+        onOutputTranscription: (text) => {
+          setLiveOutputTranscription(prev => {
+            const val = prev + text;
+            broadcastLiveState(true, accumulatedInputRef.current, val);
+            return val;
+          });
+          accumulatedOutputRef.current += text;
+        },
         onTurnComplete: () => {
-          if (liveOutputTranscription) {
-            notifyUser(`Hypley ${AGENTS[activeAgent].name}`, liveOutputTranscription);
+          if (accumulatedInputRef.current.trim()) {
+            onSendMessage({ sender: 'user', content: accumulatedInputRef.current, type: 'text', timestamp: new Date() });
+          }
+          if (accumulatedOutputRef.current.trim()) {
+            onSendMessage({ sender: 'agent', agentType: activeAgent, content: accumulatedOutputRef.current, type: 'text', timestamp: new Date() });
           }
           setLiveInputTranscription('');
           setLiveOutputTranscription('');
+          broadcastLiveState(true, '', '');
+          accumulatedInputRef.current = '';
+          accumulatedOutputRef.current = '';
         },
         onerror: (e) => {
-          console.error(e);
           setIsLive(false);
+          broadcastLiveState(false);
         }
       });
-
       liveSessionRef.current = liveSession;
-
       const inputCtx = new AudioContext({ sampleRate: 16000 });
       const source = inputCtx.createMediaStreamSource(stream);
       const processor = inputCtx.createScriptProcessor(4096, 1, 1);
@@ -220,10 +234,9 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
       };
       source.connect(processor);
       processor.connect(inputCtx.destination);
-
     } catch (err) {
-      console.error(err);
       setIsLive(false);
+      broadcastLiveState(false);
     }
   };
 
@@ -231,71 +244,47 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
     liveSessionRef.current?.close();
     liveSessionRef.current = null;
     setIsLive(false);
+    broadcastLiveState(false);
     stopAllAudio();
+  };
+
+  const handleVoiceChange = (v: VoiceType) => {
+    setVoicePreference(v);
+    if (isLive) {
+      stopLiveMode();
+      setTimeout(() => startLiveMode(v), 300);
+    }
   };
 
   const processUserMessage = async (text: string) => {
     if (!text.trim() && selectedFiles.length === 0 || isTyping) return;
-    
     const attachments = [...selectedFiles];
     setSelectedFiles([]);
-
-    onSendMessage({ 
-      sender: 'user', 
-      content: text, 
-      type: attachments.length > 0 ? 'image' : 'text', 
-      imageUrl: attachments.length > 0 && attachments[0].mimeType.startsWith('image/') ? attachments[0].data : undefined,
-      timestamp: new Date() 
-    });
-    
+    onSendMessage({ sender: 'user', content: text, type: attachments.length > 0 ? 'image' : 'text', attachments, timestamp: new Date() });
     setIsTyping(true);
-    
     try {
       const isImageRequest = !attachments.length && /(gere|crie|desenhe|faca|gera)\s+(uma|um)?\s*(imagem|logo|mockup|layout|arte|ilustracao)/i.test(text);
-      
       if (isImageRequest) {
         const agentMsgId = Date.now().toString();
-        onSendMessage({ id: agentMsgId, sender: 'agent', agentType: activeAgent, content: 'Claro, meu amor! Criando sua imagem...', type: 'text', timestamp: new Date() });
+        onSendMessage({ id: agentMsgId, sender: 'agent', agentType: activeAgent, content: 'Criando sua imagem...', type: 'text', timestamp: new Date() });
         const imageUrl = await generateImage(text);
         setIsTyping(false);
-        if (imageUrl) {
-          onSendMessage({ id: agentMsgId, content: 'Aqui está, meu bem!', type: 'image', imageUrl, timestamp: new Date() });
-          notifyUser(`Hypley ${AGENTS[activeAgent].name}`, "Sua imagem está pronta!");
-        }
+        if (imageUrl) onSendMessage({ id: agentMsgId, content: 'Imagem pronta!', type: 'image', imageUrl, timestamp: new Date() });
         return;
       }
-
-      const stream = await getAgentResponseStream(
-        activeAgent, 
-        text || "Analise este arquivo para mim, baixinho.", 
-        messages.map(m => ({ 
-          role: m.sender === 'user' ? 'user' : 'model', 
-          parts: [{ text: m.content }] 
-        })) as any, 
-        context,
-        voicePreference,
-        attachments
-      );
-      
+      const stream = await getAgentResponseStream(activeAgent, text || "O que você acha disso, uai?", messages.map(m => ({ role: m.sender === 'user' ? 'user' : 'model', parts: [{ text: m.content }] })) as any, context, voicePreference, attachments);
       const agentMsgId = Date.now().toString();
       let full = '';
-      
       onSendMessage({ id: agentMsgId, sender: 'agent', agentType: activeAgent, content: '', type: 'text', timestamp: new Date() });
       setIsTyping(false);
-
       for await (const chunk of stream) {
-        const c = chunk as GenerateContentResponse;
-        const t = c.text;
+        const t = (chunk as GenerateContentResponse).text;
         if (t) {
           full += t;
           onSendMessage({ id: agentMsgId, sender: 'agent', agentType: activeAgent, content: full, type: 'text', timestamp: new Date() });
         }
       }
-      
-      notifyUser(`Hypley ${AGENTS[activeAgent].name}`, "Acabei de responder seu pedido, baixinho!");
-
     } catch (e) { 
-      console.error("Erro no processamento:", e);
       setIsTyping(false); 
     }
   };
@@ -305,187 +294,200 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
 
   return (
     <div className="flex flex-col h-full bg-[#020617] relative w-full overflow-hidden font-sans">
-      <header className="h-16 px-4 py-2 border-b border-slate-800 flex items-center justify-between bg-[#0f172a] shrink-0 z-20 shadow-lg">
+      <header className="h-14 px-4 border-b border-slate-800/50 flex items-center justify-between bg-[#0f172a] shrink-0 z-40">
         <div className="flex items-center gap-3">
-          <button onClick={onToggleSidebar} className="p-2 text-slate-400 hover:text-white rounded-xl transition-all">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+          <button onClick={onToggleSidebar} className="text-slate-400 hover:text-white transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 12h16M4 18h16"></path></svg>
           </button>
-          <div className="flex items-center gap-3 cursor-pointer group" onClick={onToggleInfo}>
-            <div className={`w-10 h-10 rounded-xl ${agent.color} flex items-center justify-center text-xl shrink-0 text-white shadow-xl group-hover:scale-105 transition-transform`}>{agent.icon}</div>
-            <div className="min-w-0">
-              <h2 className="text-[15px] font-bold text-slate-100 truncate flex items-center gap-2">{agent.fullName}</h2>
-              <p className="text-[10px] text-blue-400 uppercase font-bold tracking-tighter">{voicePreference === 'carioca' ? 'Estilo Angelical 🧚‍♀️' : 'Modo Carinhoso ❤️'}</p>
-            </div>
+          
+          <div className="flex items-center gap-1.5 ml-1 border-l border-slate-700/50 pl-3">
+            <button 
+              onClick={() => handleVoiceChange('baiana')}
+              className={`w-7 h-7 rounded-lg text-[10px] font-black transition-all ${voicePreference === 'baiana' ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+              title="Voz Baiana ❤️"
+            >B</button>
+            <button 
+              onClick={() => handleVoiceChange('pernambucana')}
+              className={`w-7 h-7 rounded-lg text-[10px] font-black transition-all ${voicePreference === 'pernambucana' ? 'bg-pink-500 text-white shadow-lg' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+              title="Voz Pernambucana ✨"
+            >P</button>
+            <button 
+              onClick={() => handleVoiceChange('carioca')}
+              className={`w-7 h-7 rounded-lg text-[10px] font-black transition-all ${voicePreference === 'carioca' ? 'bg-cyan-600 text-white shadow-lg' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+              title="Voz Carioca 🧚‍♀️"
+            >C</button>
+            <button 
+              onClick={() => handleVoiceChange('mineira')}
+              className={`w-7 h-7 rounded-lg text-[10px] font-black transition-all ${voicePreference === 'mineira' ? 'bg-yellow-500 text-white shadow-lg' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+              title="Voz Mineira (Joelma Style) 🧀"
+            >M</button>
+          </div>
+
+          <div className="flex items-center gap-2 cursor-pointer ml-2" onClick={onToggleInfo}>
+             <div className="text-xs font-bold text-slate-300 hidden sm:block">{agent.fullName}</div>
           </div>
         </div>
 
         <button 
-          onClick={isLive ? stopLiveMode : startLiveMode}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-xs font-bold transition-all ${
-            isLive ? 'bg-red-500 border-red-400 text-white animate-pulse' : 'bg-blue-600/10 border-blue-500/30 text-blue-400 hover:bg-blue-600 hover:text-white'
+          onClick={isLive ? stopLiveMode : () => startLiveMode()}
+          className={`text-[10px] font-black px-4 py-1.5 rounded-full border transition-all ${
+            isLive ? 'bg-red-500 border-red-400 text-white animate-pulse shadow-red-500/20 shadow-lg' : 'bg-blue-600 text-white border-blue-400 shadow-lg shadow-blue-500/20'
           }`}
         >
-          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-          <span>{isLive ? 'TERMINAR CONVERSA' : 'CONVERSAR AGORA'}</span>
+          {isLive ? 'DESATIVAR VOZ' : 'FALAR AGORA'}
         </button>
       </header>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 sm:p-8 space-y-4 custom-scrollbar bg-[#020617] relative">
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:40px_40px] opacity-10 pointer-events-none"></div>
-
-        {uniqueMessages.map((msg) => (
-          <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'} mb-2`}>
-            <div className={`group/msg max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-3 shadow-xl relative text-sm leading-relaxed ${msg.sender === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-[#1e293b] text-slate-100 border border-slate-700/50 rounded-tl-none'}`}>
-              <button 
-                onClick={() => handleCopyText(msg.content, msg.id)}
-                className={`absolute ${msg.sender === 'user' ? '-left-8' : '-right-8'} top-1/2 -translate-y-1/2 p-1.5 rounded-lg opacity-0 group-hover/msg:opacity-100 transition-all hover:bg-slate-800 text-slate-500 hover:text-white`}
-                title="Copiar texto"
-              >
-                {copiedId === msg.id ? (
-                  <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
-                ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
-                )}
-              </button>
-
-              {msg.type === 'image' && msg.imageUrl && <img src={msg.imageUrl} className="mb-2 rounded-lg w-full h-auto border border-white/10" alt="Generated content" />}
-              <div className="whitespace-pre-wrap font-medium">{msg.content}</div>
-              <div className="text-[9px] opacity-40 mt-1.5 font-mono text-right">{msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-            </div>
-          </div>
-        ))}
-
+      <div className="flex-1 relative flex flex-col overflow-hidden">
+        {/* MODO VOZ: Overlay Translúcido com Opções de Cópia */}
         {isLive && (
-          <div className="space-y-4 animate-fade-in">
-            {liveInputTranscription && (
-              <div className="flex justify-end mb-2">
-                <div className="bg-blue-600/20 text-blue-300 border border-blue-500/30 px-4 py-2 rounded-2xl rounded-tr-none text-sm italic">
-                  "{liveInputTranscription}"
-                </div>
-              </div>
-            )}
-            {liveOutputTranscription && (
-              <div className="flex justify-start mb-2">
-                <div className="bg-slate-800 text-slate-100 border border-slate-700 px-4 py-2 rounded-2xl rounded-tl-none text-sm font-medium">
-                  {liveOutputTranscription}
-                </div>
-              </div>
-            )}
-            <div className="flex flex-col items-center gap-3 py-6">
-              <div className="flex gap-1.5 h-12 items-center">
-                {[...Array(12)].map((_, i) => (
-                  <div key={i} className="w-1.5 bg-blue-500 rounded-full animate-pulse" style={{ height: `${Math.random() * 100}%`, animationDelay: `${i * 0.1}s` }} />
-                ))}
-              </div>
-              <span className="text-[10px] font-black uppercase tracking-widest text-blue-400 animate-pulse">IA está ouvindo você...</span>
-            </div>
+          <div className="absolute inset-0 z-50 bg-[#020617]/95 backdrop-blur-xl flex flex-col items-center justify-center p-8 sm:p-20 text-center animate-fade-in">
+             <div className="max-w-4xl w-full flex flex-col items-center gap-12">
+                
+                {/* Sua fala no Modo Voz */}
+                {liveInputTranscription && (
+                  <div className="group relative w-full px-6">
+                    <p className="text-blue-400/70 text-base sm:text-lg italic font-medium leading-relaxed transition-all mb-2">
+                      "{liveInputTranscription}"
+                    </p>
+                    <button 
+                      onClick={() => handleCopyLive(liveInputTranscription, 'input')}
+                      className="absolute -right-2 top-0 p-2 bg-slate-800/50 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-slate-700"
+                      title="Copiar minha fala"
+                    >
+                      {liveCopiedType === 'input' ? <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"/></svg> : <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                    </button>
+                  </div>
+                )}
+
+                {/* Resposta da IA no Modo Voz */}
+                {liveOutputTranscription ? (
+                  <div className="group relative w-full px-6">
+                    <p className="text-slate-100 text-2xl sm:text-4xl font-bold leading-tight animate-fade-in transition-all">
+                      {liveOutputTranscription}
+                    </p>
+                    <button 
+                      onClick={() => handleCopyLive(liveOutputTranscription, 'output')}
+                      className="absolute -right-2 top-0 p-2 bg-blue-600/20 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-blue-600/40"
+                      title="Copiar resposta da hypley"
+                    >
+                      {liveCopiedType === 'output' ? <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"/></svg> : <svg className="w-4 h-4 text-slate-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-6">
+                    <div className="w-3 h-3 bg-blue-500 rounded-full animate-ping"></div>
+                    <p className="text-slate-600 text-[10px] uppercase tracking-[0.5em] font-black">Escutando você com carinho...</p>
+                  </div>
+                )}
+             </div>
+             
+             <button onClick={stopLiveMode} className="absolute bottom-12 px-8 py-3.5 rounded-2xl bg-[#1e293b] text-[10px] text-slate-400 hover:text-white transition-all uppercase font-black tracking-[0.3em] border border-slate-800 shadow-2xl flex items-center gap-4">
+               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+               Voltar ao Histórico
+             </button>
           </div>
         )}
 
-        {(isTranscribing || isTyping) && (
-          <div className="flex justify-start mb-4 animate-pulse">
-            <div className="bg-[#1e293b] text-blue-400 border border-slate-700 px-4 py-2 rounded-2xl rounded-tl-none text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-              <div className="flex gap-1">
-                <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce"></span>
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 sm:p-12 space-y-6 custom-scrollbar pt-10 pb-24">
+          {uniqueMessages.map((msg) => (
+            <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[95%] sm:max-w-[85%] rounded-2xl px-5 py-4 text-[14px] leading-relaxed relative group shadow-sm transition-all ${
+                msg.sender === 'user' 
+                ? 'bg-blue-600 text-white rounded-tr-none shadow-blue-500/10' 
+                : 'bg-[#1e293b] text-slate-100 border border-slate-800 rounded-tl-none'
+              }`}>
+                {/* Botão de Cópia Persistente no Chat */}
+                <button 
+                  onClick={() => handleCopyText(msg.content, msg.id)}
+                  className={`absolute ${msg.sender === 'user' ? '-left-10' : '-right-10'} top-2 p-2 bg-[#020617] border border-slate-800 rounded-xl opacity-0 group-hover:opacity-100 transition-all hover:scale-110 active:scale-95 z-10 shadow-xl`}
+                >
+                  {copiedId === msg.id ? (
+                    <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
+                  ) : (
+                    <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>
+                  )}
+                </button>
+
+                {msg.attachments?.map((att, i) => att.mimeType.startsWith('image/') && (
+                  <img key={i} src={att.data} className="mb-3 rounded-xl max-h-80 w-auto shadow-lg border border-white/5" alt="attachment" />
+                ))}
+                
+                {msg.type === 'image' && msg.imageUrl && <img src={msg.imageUrl} className="mb-3 rounded-xl shadow-lg border border-white/5" alt="AI gen" />}
+                
+                <div className="whitespace-pre-wrap font-medium">{msg.content}</div>
+                
+                <div className="mt-3 text-[9px] opacity-20 font-mono text-right uppercase tracking-widest">
+                  {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </div>
               </div>
-              {isTranscribing ? 'Ouvindo seu áudio...' : 'Hypley está pensando...'}
             </div>
-          </div>
-        )}
+          ))}
+
+          {isTyping && (
+             <div className="text-[9px] text-blue-500 font-black uppercase tracking-[0.3em] animate-pulse pl-2">Desenhando soluções doces...</div>
+          )}
+        </div>
       </div>
 
-      {!isLive && (
-        <footer className="px-4 py-4 sm:px-6 flex flex-col gap-3 bg-[#0f172a] border-t border-slate-800 shrink-0 z-20">
-          {selectedFiles.length > 0 && (
-            <div className="flex flex-wrap gap-2 animate-fade-in">
-              {selectedFiles.map((f, i) => (
-                <div key={i} className="relative group/file">
-                  {f.mimeType.startsWith('image/') ? (
-                    <img src={f.data} className="w-16 h-16 object-cover rounded-lg border border-slate-700" alt="Preview" />
-                  ) : (
-                    <div className="w-16 h-16 bg-slate-800 border border-slate-700 rounded-lg flex items-center justify-center text-[8px] text-slate-300 font-bold p-1 overflow-hidden text-center">{f.name}</div>
-                  )}
-                  <button 
-                    onClick={() => removeFile(i)}
-                    className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 shadow-lg opacity-0 group-hover/file:opacity-100 transition-opacity"
-                  >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeWidth="3"/></svg>
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="flex items-end gap-3">
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              className="hidden" 
-              multiple 
-              onChange={handleFileChange}
-              accept="image/*,application/pdf,text/plain" 
-            />
-            
-            <div className="flex gap-1">
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="w-10 h-10 bg-slate-800 text-slate-400 hover:text-white rounded-xl flex items-center justify-center transition-all"
-                title="Anexar arquivos/fotos"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.414a4 4 0 00-5.656-5.656l-6.415 6.414a6 6 0 108.486 8.486L20.5 13" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-              </button>
-              
-              <button 
-                onClick={handleScreenCapture}
-                className="w-10 h-10 bg-slate-800 text-slate-400 hover:text-white rounded-xl flex items-center justify-center transition-all"
-                title="Capturar tela"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-              </button>
-            </div>
-
+      <footer className="p-4 sm:p-6 bg-[#0f172a] border-t border-slate-800/40">
+        <div className="max-w-5xl mx-auto flex items-end gap-3">
+          <input type="file" ref={fileInputRef} className="hidden" multiple onChange={handleFileChange} />
+          
+          <button 
+            onClick={() => fileInputRef.current?.click()} 
+            className="w-12 h-12 rounded-2xl bg-[#1e293b] text-slate-500 hover:text-white flex items-center justify-center transition-colors border border-slate-800 shadow-sm"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.414a4 4 0 00-5.656-5.656l-6.415 6.414a6 6 0 108.486 8.486L20.5 13" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
+          
+          <div className="flex-1 relative">
             <textarea
-              ref={textareaRef}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); processUserMessage(inputText); setInputText(''); } }}
-              placeholder={isRecording ? "Gravando..." : "Perguntar com carinho..."}
-              className={`flex-1 bg-[#1e293b] border-slate-700/50 border text-slate-100 text-sm py-3 px-4 rounded-xl resize-none focus:ring-2 focus:ring-blue-500/50 transition-all ${isRecording ? 'ring-2 ring-red-500/50 border-red-500/50' : ''}`}
+              placeholder="O que vamos criar hoje, uai?"
+              className="w-full bg-[#1e293b] text-white text-[15px] py-3.5 px-5 rounded-2xl resize-none outline-none focus:ring-2 focus:ring-blue-500/10 border border-slate-800 transition-all min-h-[52px] max-h-32 shadow-inner"
               rows={1}
-              disabled={isRecording}
             />
-            
-            <div className="flex items-center gap-2">
-              {!inputText.trim() && selectedFiles.length === 0 ? (
-                <button 
-                  onMouseDown={startRecording}
-                  onMouseUp={stopRecording}
-                  onMouseLeave={stopRecording}
-                  onTouchStart={startRecording}
-                  onTouchEnd={stopRecording}
-                  className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all shadow-lg active:scale-95 ${
-                    isRecording 
-                    ? 'bg-red-600 text-white animate-pulse shadow-red-900/40' 
-                    : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'
-                  }`}
-                  title="Segure para falar"
-                >
-                  <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-                </button>
-              ) : (
-                <button 
-                  onClick={() => { processUserMessage(inputText); setInputText(''); }}
-                  className="w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-xl flex items-center justify-center transition-all shadow-lg active:scale-95"
-                >
-                  <svg className="w-6 h-6 rotate-90" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-                </button>
-              )}
-            </div>
           </div>
-        </footer>
-      )}
+
+          <div className="flex gap-2">
+            {!inputText.trim() && selectedFiles.length === 0 ? (
+              <button 
+                onMouseDown={startRecording} onMouseUp={stopRecording}
+                className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all shadow-xl ${
+                  isRecording ? 'bg-red-600 text-white animate-pulse scale-110' : 'bg-slate-800 text-slate-500'
+                }`}
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+              </button>
+            ) : (
+              <button 
+                onClick={() => { processUserMessage(inputText); setInputText(''); }}
+                className="w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl flex items-center justify-center transition-all shadow-xl active:scale-90"
+              >
+                <svg className="w-6 h-6 rotate-90" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+              </button>
+            )}
+          </div>
+        </div>
+        
+        {selectedFiles.length > 0 && (
+          <div className="max-w-5xl mx-auto flex flex-wrap gap-2 mt-3">
+             {selectedFiles.map((f, i) => (
+               <div key={i} className="relative group">
+                 {f.mimeType.startsWith('image/') ? (
+                    <img src={f.data} className="w-12 h-12 object-cover rounded-lg border border-slate-700" alt="preview" />
+                 ) : (
+                    <div className="w-12 h-12 bg-slate-800 rounded-lg flex items-center justify-center text-[8px] text-slate-500">{f.name.slice(0,5)}</div>
+                 )}
+                 <button onClick={() => removeFile(i)} className="absolute -top-1 -right-1 bg-red-500 rounded-full p-0.5 text-white shadow-lg"><svg className="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeWidth="3"/></svg></button>
+               </div>
+             ))}
+          </div>
+        )}
+      </footer>
     </div>
   );
 };
