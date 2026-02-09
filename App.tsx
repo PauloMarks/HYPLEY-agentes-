@@ -16,12 +16,14 @@ const INITIAL_MESSAGES: Message[] = [
   }
 ];
 
+const EXPIRATION_TIME = 24 * 60 * 60 * 1000; // 24 horas em milisegundos
+
 const App: React.FC = () => {
   const [activeAgent, setActiveAgent] = useState<AgentType>(AgentType.IDEIAS);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAppOpen, setIsAppOpen] = useState(true);
   const [showProjectInfo, setShowProjectInfo] = useState(false);
-  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [voicePreference, setVoicePreference] = useState<VoiceType>('baiana');
   const [context, setContext] = useState<ProjectContext>({
     name: 'Projeto HYPLEY',
@@ -35,15 +37,41 @@ const App: React.FC = () => {
 
   const syncChannel = useRef<BroadcastChannel | null>(null);
 
-  // Inicializa Canal de Sincronização entre Abas
+  // Carregamento inicial e Limpeza de 24h
   useEffect(() => {
-    syncChannel.current = new BroadcastChannel('hypley_sync');
+    // Carregar Contexto e Voz
+    const savedContext = localStorage.getItem('hypley_context');
+    if (savedContext) setContext(JSON.parse(savedContext));
     
+    const savedVoice = localStorage.getItem('hypley_voice') as VoiceType;
+    if (savedVoice) setVoicePreference(savedVoice);
+
+    // Carregar e Filtrar Mensagens (Máximo 24h)
+    const savedMessages = localStorage.getItem('hypley_messages');
+    const now = Date.now();
+    
+    if (savedMessages) {
+      try {
+        const parsed: Message[] = JSON.parse(savedMessages);
+        const validMessages = parsed
+          .map(m => ({ ...m, timestamp: new Date(m.timestamp) }))
+          .filter(m => (now - m.timestamp.getTime()) < EXPIRATION_TIME);
+        
+        setMessages(validMessages.length > 0 ? validMessages : INITIAL_MESSAGES);
+      } catch (e) {
+        setMessages(INITIAL_MESSAGES);
+      }
+    } else {
+      setMessages(INITIAL_MESSAGES);
+    }
+
+    // Inicializar Canal de Sincronização
+    syncChannel.current = new BroadcastChannel('hypley_sync');
     syncChannel.current.onmessage = (event) => {
       const { type, payload } = event.data;
       if (type === 'NEW_MESSAGE') {
         const msg = payload as Message;
-        msg.timestamp = new Date(msg.timestamp); // Reconverte data
+        msg.timestamp = new Date(msg.timestamp);
         setMessages(prev => {
           const exists = prev.find(m => m.id === msg.id);
           if (exists) return prev.map(m => m.id === msg.id ? msg : m);
@@ -56,7 +84,6 @@ const App: React.FC = () => {
       }
     };
 
-    // Solicita permissão de notificação para segundo plano
     if ("Notification" in window) {
       Notification.requestPermission();
     }
@@ -64,17 +91,14 @@ const App: React.FC = () => {
     return () => syncChannel.current?.close();
   }, []);
 
-  useEffect(() => {
-    const savedContext = localStorage.getItem('hypley_context');
-    if (savedContext) setContext(JSON.parse(savedContext));
-    const savedVoice = localStorage.getItem('hypley_voice') as VoiceType;
-    if (savedVoice) setVoicePreference(savedVoice);
-  }, []);
-
+  // Persistência Automática
   useEffect(() => {
     localStorage.setItem('hypley_context', JSON.stringify(context));
     localStorage.setItem('hypley_voice', voicePreference);
-  }, [context, voicePreference]);
+    if (messages.length > 0) {
+      localStorage.setItem('hypley_messages', JSON.stringify(messages));
+    }
+  }, [context, voicePreference, messages]);
 
   const handleSendMessage = useCallback((msg: Partial<Message>, skipSync: boolean = false) => {
     let newMessage: Message;

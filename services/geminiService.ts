@@ -8,9 +8,10 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 export const getAgentResponseStream = async (
   agentType: AgentType,
   prompt: string,
-  history: { role: 'user' | 'model', parts: { text: string }[] }[],
+  history: { role: 'user' | 'model', parts: { text?: string, inlineData?: any }[] }[],
   context: ProjectContext,
-  voice?: VoiceType
+  voice?: VoiceType,
+  attachments?: { data: string, mimeType: string }[]
 ) => {
   const agent = AGENTS[agentType];
   
@@ -36,7 +37,7 @@ export const getAgentResponseStream = async (
     Tech Stack: ${context.stack || 'Not defined'}
     Key Features: ${context.features.join(', ') || 'None listed'}
     
-    IMPORTANTE: O usuário acabou de enviar uma mensagem. 
+    IMPORTANTE: O usuário enviou uma mensagem (pode conter arquivos/imagens). 
     Responda de forma rápida, eficiente e com o carinho especificado acima.
   `;
 
@@ -55,7 +56,19 @@ export const getAgentResponseStream = async (
     history: history as any
   });
 
-  return await chat.sendMessageStream({ message: prompt });
+  const parts: any[] = [{ text: prompt }];
+  if (attachments && attachments.length > 0) {
+    attachments.forEach(att => {
+      parts.push({
+        inlineData: {
+          data: att.data.split(',')[1],
+          mimeType: att.mimeType
+        }
+      });
+    });
+  }
+
+  return await chat.sendMessageStream({ message: { parts } });
 };
 
 export const connectLiveAgent = async (
