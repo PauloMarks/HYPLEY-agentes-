@@ -1,0 +1,9 @@
+{
+  "name": "HYPLEY - SaaS Productivity Hub",
+  "description": "A multi-agent platform for building, managing, and scaling SaaS and micro-SaaS products with specialized AI assistance.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "display-capture"
+  ]
+}
